@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.tilman-schieber.omacompose",
+  "name": "Omacompose",
+  "version": "0.1.0",
+  "author": "Tilman Schieber",
+  "license": "MIT",
+  "homepage": "https://github.com/tilman-schieber/omacompose",
+  "description": "Which-key style overlay listing the XCompose sequences available after the compose key, read live from ~/.XCompose and everything it includes.",
+  "kinds": [
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "Omacompose.qml"
+  }
+}
