@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Dump the effective XCompose table as JSON for the omacompose overlay.
 
-Resolves the same file libxkbcommon/libX11 would use ($XCOMPOSEFILE, then
-~/.XCompose, then the locale's Compose), follows `include` lines with the
+Resolves the same file libxkbcommon would use ($XCOMPOSEFILE, then
+$XDG_CONFIG_HOME/XCompose, then ~/.XCompose, then the locale's Compose),
+follows `include` lines with the
 %H / %L / %S substitutions, and keeps only <Multi_key> sequences. Each key
 gets a display label via libxkbcommon, and the keyboard layout Hyprland is
 running is used to drop sequences that can't be typed on it.
@@ -16,7 +17,7 @@ import re
 import subprocess
 import sys
 
-X11_LOCALE = "/usr/share/X11/locale"
+X11_LOCALE = os.environ.get("XLOCALEDIR") or "/usr/share/X11/locale"
 HOME = os.path.expanduser("~")
 
 
@@ -28,19 +29,33 @@ def current_locale():
     return "C"
 
 
-def locale_compose_file(locale):
-    # compose.dir maps "<dir>/Compose  <locale>"; try the full name, then
-    # common normalizations (en_US.utf8 -> en_US.UTF-8).
-    candidates = [locale, re.sub(r"\.utf-?8$", ".UTF-8", locale, flags=re.I)]
+def locale_rows(name):
+    """(first, second) columns of locale.alias or compose.dir."""
     try:
-        with open(os.path.join(X11_LOCALE, "compose.dir"), encoding="utf-8") as f:
-            rows = [line.split() for line in f if line.strip() and not line.startswith("#")]
+        with open(os.path.join(X11_LOCALE, name), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                row = line.split()
+                if len(row) >= 2 and not row[0].startswith("#"):
+                    yield row[0].rstrip(":"), row[1].rstrip(":")
     except OSError:
-        return None
+        return
+
+
+def locale_compose_file(locale):
+    # Like libxkbcommon: resolve aliases first (en_US -> en_US.ISO8859-1,
+    # POSIX -> C), then use the UTF-8 table for C, which compose.dir points
+    # at the Latin-1 one.
+    alias = next((value for name, value in locale_rows("locale.alias") if name == locale), locale)
+    if alias == "C":
+        alias = "en_US.UTF-8"
+    # compose.dir maps "<dir>/Compose  <locale>"; try the name, then the
+    # usual spelling of its codeset (en_US.utf8 -> en_US.UTF-8).
+    candidates = [alias, re.sub(r"\.utf-?8$", ".UTF-8", alias, flags=re.I)]
+    rows = list(locale_rows("compose.dir"))
     for name in candidates:
-        for row in rows:
-            if len(row) >= 2 and row[1].rstrip(":") == name:
-                return os.path.join(X11_LOCALE, row[0].rstrip(":"))
+        for path, row_locale in rows:
+            if row_locale == name:
+                return os.path.join(X11_LOCALE, path)
     return None
 
 
@@ -48,9 +63,10 @@ def root_compose_file():
     env = os.environ.get("XCOMPOSEFILE")
     if env and os.path.isfile(env):
         return env
-    home = os.path.join(HOME, ".XCompose")
-    if os.path.isfile(home):
-        return home
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config")
+    for path in (os.path.join(xdg, "XCompose"), os.path.join(HOME, ".XCompose")):
+        if os.path.isfile(path):
+            return path
     return locale_compose_file(current_locale())
 
 
@@ -89,62 +105,87 @@ def unescape(s):
         return "".join(out)
 
 
+def decode(raw):
+    # Compose files are UTF-8, except the tables for legacy locales; read a
+    # line that isn't UTF-8 as Latin-1, like the octal escapes in unescape().
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
+
+
 def parse(path, table, sources, custom, seen, descendants):
     real = os.path.realpath(path)
     if real in seen or not os.path.isfile(real):
         return
     seen.add(real)
+    try:
+        with open(real, "rb") as f:
+            lines = [decode(raw) for raw in f]
+    except OSError as e:
+        # An unreadable include shouldn't cost the rest of the table.
+        print(f"omacompose: skipping {path}: {e.strerror}", file=sys.stderr)
+        return
     sources.append(path)
-    is_custom = not real.startswith(X11_LOCALE + "/")
-    with open(real, encoding="utf-8", errors="replace") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("include"):
-                m = STRING.search(line)
-                if not m:
-                    continue
-                target = m.group(1)
-                target = target.replace("%H", HOME).replace("%S", X11_LOCALE)
-                if "%L" in target:
-                    loc = locale_compose_file(current_locale())
-                    if not loc:
-                        continue
-                    target = target.replace("%L", loc)
-                parse(target, table, sources, custom, seen, descendants)
-                continue
-            if ":" not in line:
-                continue
-            lhs, rhs = line.split(":", 1)
-            keys = TOKEN.findall(lhs)
-            # Skip modifier-qualified lines (e.g. "~Ctrl <a>"): anything
-            # besides <keysym> tokens on the left-hand side.
-            if not keys or TOKEN.sub("", lhs).strip() or keys[0] != "Multi_key" or len(keys) < 2:
-                continue
-            m = STRING.search(rhs)
+    is_custom = not real.startswith(os.path.realpath(X11_LOCALE) + "/")
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("include"):
+            m = STRING.search(line)
             if not m:
                 continue
-            result = unescape(m.group(1))
-            after = rhs[m.end():]
-            comment = after.split("#", 1)[1].strip() if "#" in after else ""
-            seq = tuple(keys[1:])
-            # Later definitions win, like in libxkbcommon: a new sequence
-            # replaces an existing one that is its prefix, or that it is a
-            # prefix of (so `<Multi_key> <a> : "ä"` hides every `<a> <…>`).
-            for i in range(1, len(seq)):
-                if table.pop(seq[:i], None) is not None:
-                    custom.discard(seq[:i])
-            for longer in descendants.pop(seq, ()):
-                if table.pop(longer, None) is not None:
-                    custom.discard(longer)
-            table[seq] = (result, comment)
-            for i in range(1, len(seq)):
-                descendants.setdefault(seq[:i], set()).add(seq)
-            if is_custom:
-                custom.add(seq)
-            else:
-                custom.discard(seq)
+            target = m.group(1)
+            target = target.replace("%H", HOME).replace("%S", X11_LOCALE)
+            if "%L" in target:
+                loc = locale_compose_file(current_locale())
+                if not loc:
+                    continue
+                target = target.replace("%L", loc)
+            parse(target, table, sources, custom, seen, descendants)
+            continue
+        if ":" not in line:
+            continue
+        lhs, rhs = line.split(":", 1)
+        keys = TOKEN.findall(lhs)
+        # Skip modifier-qualified lines (e.g. "~Ctrl <a>"): anything
+        # besides <keysym> tokens on the left-hand side.
+        if not keys or TOKEN.sub("", lhs).strip() or keys[0] != "Multi_key" or len(keys) < 2:
+            continue
+        m = STRING.search(rhs)
+        if not m:
+            continue
+        result = unescape(m.group(1))
+        after = rhs[m.end():]
+        comment = after.split("#", 1)[1].strip() if "#" in after else ""
+        seq = tuple(keys[1:])
+        # Later definitions win, like in libxkbcommon: a new sequence
+        # replaces an existing one that is its prefix, or that it is a
+        # prefix of (so `<Multi_key> <a> : "ä"` hides every `<a> <…>`).
+        for i in range(1, len(seq)):
+            if table.pop(seq[:i], None) is not None:
+                custom.discard(seq[:i])
+        for longer in descendants.pop(seq, ()):
+            if table.pop(longer, None) is not None:
+                custom.discard(longer)
+        table[seq] = (result, comment)
+        for i in range(1, len(seq)):
+            descendants.setdefault(seq[:i], set()).add(seq)
+        if is_custom:
+            custom.add(seq)
+        else:
+            custom.discard(seq)
+
+
+# Keysyms libxkbcommon has no text for. Dead keys get their spacing accent.
+SPECIAL_LABELS = {
+    "space": "␣", "Multi_key": "compose",
+    "dead_grave": "`", "dead_acute": "´", "dead_circumflex": "^", "dead_tilde": "~",
+    "dead_macron": "¯", "dead_breve": "˘", "dead_abovedot": "˙", "dead_diaeresis": "¨",
+    "dead_abovering": "˚", "dead_doubleacute": "˝", "dead_caron": "ˇ", "dead_cedilla": "¸",
+    "dead_ogonek": "˛", "dead_iota": "ͺ",
+}
 
 
 class Xkb:
@@ -171,7 +212,7 @@ class Xkb:
                 if n > 1:
                     text = buf.value.decode("utf-8", "replace")
         if not text or not text.isprintable():
-            text = {"space": "␣", "Multi_key": "compose"}.get(keysym, keysym)
+            text = SPECIAL_LABELS.get(keysym) or keysym.removeprefix("dead_")
         if text == " ":
             text = "␣"
         self.cache[keysym] = text
@@ -179,7 +220,8 @@ class Xkb:
 
 
 def typeable_keysyms():
-    """Level 1/2 keysyms of the layout Hyprland's main keyboard uses."""
+    """Keysyms on levels 1-4 (plain, Shift, AltGr, AltGr+Shift) of the
+    layout(s) Hyprland's main keyboard uses."""
     try:
         devices = json.loads(subprocess.run(["hyprctl", "-j", "devices"], capture_output=True,
                                             text=True, timeout=2).stdout)
@@ -194,12 +236,18 @@ def typeable_keysyms():
         keymap = subprocess.run(args, capture_output=True, text=True, timeout=2).stdout
     except Exception:
         return None
+    return keymap_keysyms(keymap)
+
+
+def keymap_keysyms(keymap):
     symbols = keymap.split("xkb_symbols", 1)[-1]
     syms = set()
     for block in re.findall(r"key\s+<[^>]+>\s*\{(.*?)\};", symbols, re.S):
+        # Several layouts are written `symbols[1]= [ … ]`; drop those labels.
+        block = re.sub(r"\w+\[[^\]]*\]", "", block)
         for group in re.findall(r"\[([^\]]*)\]", block):
             levels = [s.strip() for s in group.split(",")]
-            syms.update(s for s in levels[:2] if s and s != "NoSymbol")
+            syms.update(s for s in levels[:4] if s and s not in ("NoSymbol", "VoidSymbol"))
     return syms or None
 
 

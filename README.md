@@ -15,7 +15,8 @@ the overlay only watches. It never takes keyboard focus or mouse input.
 ## Features
 
 - **Reads your real configuration.** Every time you press compose it re-reads
-  `$XCOMPOSEFILE` (or `~/.XCompose`, or your locale's table), follows every
+  `$XCOMPOSEFILE` (or `~/.config/XCompose`, `~/.XCompose`, or your locale's
+  table, the same order libxkbcommon uses), follows every
   `include`, and expands `%L`, `%H` and `%S`. Edit the file, press compose,
   and the change is there.
 - **Same rules as the real thing.** A later definition replaces an earlier one,
@@ -23,7 +24,8 @@ the overlay only watches. It never takes keyboard focus or mouse input.
   `<Multi_key> <a> : "ä"`, the overlay shows that `a` gives `ä` instead of
   listing the locale's `a…` sequences you can no longer reach.
 - **Only what you can type.** It reads the keyboard layout Hyprland is using
-  and hides sequences that need keys your layout doesn't have.
+  and hides sequences that need keys your layout doesn't have, counting
+  Shift and AltGr levels.
 - **Your sequences first.** At the start, your own and Omarchy's sequences are
   shown in full, with their `# comments` as labels. The locale's sequences are
   listed by their first key.
@@ -66,9 +68,11 @@ Caps Lock ─► Hyprland ──► app          (compose works as always)
 1. **`hypr/omacompose.lua`** binds `Multi_key` without consuming it, then
    enters an `omacompose` submap. There, every key of your layout (read from
    `xkbcli compile-keymap`) has a non-consuming bind that reports its keysym.
-   Shift is resolved through the keymap, so Shift+' reports `quotedbl`.
-   Escape, Backspace, Enter, Tab and the Ctrl, Alt and Super keys leave the
-   submap at once, so shortcuts keep working.
+   Shift and AltGr are resolved through the keymap, so Shift+' reports
+   `quotedbl` and AltGr+q on a German layout reports `at`. Escape, Backspace,
+   Enter, Tab and the Ctrl, Alt and Super keys leave the submap at once, so
+   shortcuts keep working. If the shell doesn't answer, a 10s watchdog
+   leaves the submap anyway.
 2. **`compose-table.py`** parses the compose files and prints the effective
    table as JSON, with display labels from libxkbcommon. It takes about 60ms
    and runs again at the start of every sequence.
@@ -80,6 +84,12 @@ Caps Lock ─► Hyprland ──► app          (compose works as always)
 
 While a sequence is in progress, Hyprland only uses the submap's binds, so
 global shortcuts like volume keys are inactive until it ends.
+
+The keymap is read from the global `input` settings when Hyprland loads its
+config; per-device layouts aren't followed. With several layouts, Hyprland
+matches binds as if the first layout were active (unless you set
+`input:resolve_binds_by_sym`), so the overlay can misreport keys typed while
+another layout is active.
 
 ## Configuration
 

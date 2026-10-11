@@ -25,12 +25,15 @@ Item {
   property int maxCells: 60
 
   property var table: ({ labels: {}, entries: [], sources: [] })
-  property int seqId: 0
+  property real seqId: 0
+  property int msgNo: 0
+  property bool finished: true
+  property bool reloadQueued: false
   property var seq: []
   property var view: ({ state: "dead", groups: [] })
   property bool opened: false
 
-  readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "")
+  readonly property string pluginDir: decodeURIComponent(String(Qt.resolvedUrl(".")).replace(/^file:\/\//, ""))
   readonly property var customGroups: view.groups.filter(function(g) { return g.custom })
   readonly property var otherGroups: view.groups.filter(function(g) { return !g.custom })
   // At the root only your own sequences get cells; the locale table's
@@ -42,13 +45,28 @@ Item {
   readonly property int pad: Style.space(14)
   readonly property int cellWidth: Style.space(168)
   readonly property int cellHeight: Style.space(30)
-  readonly property int columns: Math.max(1, Math.min(5, cellGroups.length))
+  // As many columns as fit on the screen, at most 5. The screen's width is
+  // known before the panel is shown, the panel's own isn't.
+  readonly property real screenWidth: panel.screen ? panel.screen.width : 1920
+  readonly property int maxColumns: Math.floor((screenWidth - Style.gapsOut * 4 - card.borderLeft - card.borderRight - pad * 2 + Style.spacing.xl)
+                                               / (cellWidth + Style.spacing.xl))
+  readonly property int columns: Math.max(1, Math.min(5, maxColumns, cellGroups.length))
 
-  function update(id, rawSeq) {
+  // Each message is its own process, so they can arrive out of order: drop
+  // anything older than what this sequence has already seen, and anything for
+  // a sequence that is already over.
+  function update(id, msg, rawSeq) {
     var n = parseInt(id, 10) || 0
+    var m = parseInt(msg, 10) || 0
     if (n < seqId) return
-    if (n > seqId) reload()
-    seqId = n
+    if (n > seqId) {
+      seqId = n
+      msgNo = 0
+      finished = false
+      reload()
+    }
+    if (finished || m <= msgNo) return
+    msgNo = m
 
     if (rawSeq === "!") { finish(false); return }
     seq = rawSeq === "-" || rawSeq === "" ? [] : rawSeq.split(",")
@@ -62,6 +80,7 @@ Item {
   }
 
   function finish(resetSubmap) {
+    finished = true
     showTimer.stop()
     idleTimer.stop()
     opened = false
@@ -72,7 +91,8 @@ Item {
   // Re-read the compose files on every new sequence, so edits to ~/.XCompose
   // (or anything it includes) show up without restarting anything.
   function reload() {
-    if (!loader.running) loader.running = true
+    if (loader.running) reloadQueued = true
+    else loader.running = true
   }
 
   Component.onCompleted: reload()
@@ -80,12 +100,16 @@ Item {
   Process {
     id: loader
     command: ["python3", "-I", root.pluginDir + "compose-table.py"]
+    onExited: if (root.reloadQueued) {
+      root.reloadQueued = false
+      root.reload()
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
           root.table = JSON.parse(text)
-          if (root.seqId > 0 && (root.opened || showTimer.running)) root.view = ComposeModel.step(root.table, root.seq)
+          if (!root.finished && (root.opened || showTimer.running)) root.view = ComposeModel.step(root.table, root.seq)
         } catch (e) {
           console.warn("omacompose: bad compose table", e)
         }
@@ -111,8 +135,8 @@ Item {
 
   IpcHandler {
     target: "omacompose"
-    function update(id: string, seq: string): string {
-      root.update(id, seq)
+    function update(id: string, msg: string, seq: string): string {
+      root.update(id, msg, seq)
       return "ok"
     }
     function hide(): string { root.finish(true); return "ok" }
