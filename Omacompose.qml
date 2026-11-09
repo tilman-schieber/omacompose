@@ -48,9 +48,18 @@ Item {
   // As many columns as fit on the screen, at most 5. The screen's width is
   // known before the panel is shown, the panel's own isn't.
   readonly property real screenWidth: panel.screen ? panel.screen.width : 1920
+  // Most vertical room the card may use, so the overlay never runs off the
+  // bottom of the screen no matter how many options fit in the grid.
+  readonly property int maxCardHeight: panel.height - Style.space(64) - Style.space(24)
   readonly property int maxColumns: Math.floor((screenWidth - Style.gapsOut * 4 - card.borderLeft - card.borderRight - pad * 2 + Style.spacing.xl)
                                                / (cellWidth + Style.spacing.xl))
   readonly property int columns: Math.max(1, Math.min(5, maxColumns, cellGroups.length))
+  // The system-sequence chips flow to their own width. An explicit width does
+  // not propagate to Column.implicitWidth, so the card would size too narrow
+  // and the chips would spill past its edge; track the width explicitly.
+  readonly property int systemFlowWidth: Math.max(grid.width, Style.space(560))
+  readonly property int cardContentWidth: Math.max(Style.space(220), content.implicitWidth,
+    atRoot && otherGroups.length > 0 ? systemFlowWidth : 0)
 
   // Each message is its own process, so they can arrive out of order: drop
   // anything older than what this sequence has already seen, and anything for
@@ -185,8 +194,9 @@ Item {
     BorderSurface {
       id: card
       width: Math.min(panel.width - Style.gapsOut * 4,
-                      card.borderLeft + root.pad * 2 + Math.max(content.implicitWidth, Style.space(220)) + card.borderRight)
-      height: card.borderTop + root.pad * 2 + content.implicitHeight + card.borderBottom
+                      card.borderLeft + root.pad * 2 + root.cardContentWidth + card.borderRight)
+      height: Math.min(card.borderTop + root.pad * 2 + content.implicitHeight + card.borderBottom,
+                       root.maxCardHeight)
       anchors.horizontalCenter: parent.horizontalCenter
       anchors.top: parent.top
       anchors.topMargin: Style.space(64)
@@ -296,7 +306,9 @@ Item {
             color: Util.alpha(Color.popups.text, 0.6)
           }
           Flow {
-            width: Math.max(grid.width, Style.space(560))
+            // Clamp to the card's inner width so the 560px floor can't spill
+            // past the card edge on narrow screens.
+            width: Math.min(root.systemFlowWidth, content.width)
             spacing: Style.spacing.sm
             Repeater {
               model: root.atRoot ? root.otherGroups : []

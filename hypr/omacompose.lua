@@ -161,8 +161,9 @@ if #keys > 0 then
       local level3 = typed(levels[3]) and levels[3] or nil
       local level4 = typed(levels[4]) and levels[4] or level3
       if base == "Multi_key" then
-        -- Compose pressed again mid-sequence: start over.
-        bind(base, start, { ignore_mods = true })
+        -- Compose pressed again cancels, like XCompose: close the overlay
+        -- instead of silently restarting the sequence.
+        bind(base, cancel, { ignore_mods = true })
       elseif IGNORE[base] then
         -- Modifiers that are part of typing a sequence.
       elseif is_cancel(base) then
